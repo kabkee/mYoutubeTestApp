@@ -8,16 +8,23 @@
 
 #import <XCTest/XCTest.h>
 
+#import "ViewController.h"
+
 @interface mYoutubeTestAppTests : XCTestCase
 
 @end
 
 @implementation mYoutubeTestAppTests
+{
+    ViewController *vc;
+}
 
 - (void)setUp
 {
     [super setUp];
     // Put setup code here. This method is called before the invocation of each test method in the class.
+    
+    vc = [[ViewController alloc]init];
 }
 
 - (void)tearDown
@@ -26,9 +33,10 @@
     [super tearDown];
 }
 
-- (void)testExample
+- (void)testFetchMyChannelList
 {
-    XCTFail(@"No implementation for \"%s\"", __PRETTY_FUNCTION__);
+
+
 }
 
 @end

@@ -11,6 +11,19 @@
 #import "GTMOAuth2ViewControllerTouch.h"
 #import "GTMOAuth2SignIn.h"
 
+#import "GTLUtilities.h"
+#import "GTMHTTPUploadFetcher.h"
+#import "GTMHTTPFetcherLogging.h"
+
+enum {
+    // Playlist pop-up menu item tags.
+    kUploadsTag = 0,
+    kLikesTag = 1,
+    kFavoritesTag = 2,
+    kWatchHistoryTag = 3,
+    kWatchLaterTag = 4
+};
+
 static NSString *const kKeychainItemName = @"mYoutubeTestApp : youtube";
 NSString *clientID = @"433777687178.apps.googleusercontent.com";
 NSString *clientSecret = @"ZdlMSq6ZWY1GgQDvFnJpnHwN";
@@ -31,15 +44,32 @@ NSString *clientSecret = @"ZdlMSq6ZWY1GgQDvFnJpnHwN";
 //- (void)saveClientIDValues;
 //- (void)loadClientIDValues;
 
+@property (nonatomic, readonly) GTLServiceYouTube *youTubeService;
+
 @end
+
 
 @implementation ViewController
 @synthesize auth;
 @synthesize btnSignInOut;
+@synthesize videoTableView;
+@synthesize _myPlaylists;
+@synthesize _playlistItemList;
 
 static NSString *const kGoogleClientIDKey          = @"GoogleClientID";
 static NSString *const kGoogleClientSecretKey      = @"GoogleClientSecret";
 static NSString *const kGoogleProfileKey      = @"GoogleProfile";
+
+//GTLYouTubeChannelContentDetailsRelatedPlaylists *_myPlaylists;
+GTLServiceTicket *_channelListTicket;
+NSError *_channelListFetchError;
+
+//GTLYouTubePlaylistItemListResponse *_playlistItemList;
+GTLServiceTicket *_playlistItemListTicket;
+NSError *_playlistFetchError;
+
+GTLServiceTicket *_uploadFileTicket;
+NSURL *_uploadLocationURL;  // URL for restarting an upload.
 
 NSDictionary *googleProfile = nil;
 
@@ -79,6 +109,7 @@ NSDictionary *googleProfile = nil;
         
         // save the authentication object
         self.auth = anAuth;
+        self.youTubeService.authorizer = anAuth;
 
         googleProfile = viewController.signIn.userProfile;
         NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
@@ -140,7 +171,7 @@ NSDictionary *googleProfile = nil;
     
     // For Google APIs, the scope strings are available
     // in the service constant header files.
-    NSString *scope = @"https://www.googleapis.com/auth/plus.me";
+//    NSString *scope = @"https://www.googleapis.com/auth/plus.me";
     
     // Typically, applications will hardcode the client ID and client secret
     // strings into the source code; they should not be user-editable or visible.
@@ -155,7 +186,7 @@ NSDictionary *googleProfile = nil;
     SEL finishedSel = @selector(viewController:finishedWithAuth:error:);
     
     GTMOAuth2ViewControllerTouch *viewController;
-    viewController = [GTMOAuth2ViewControllerTouch controllerWithScope:scope
+    viewController = [GTMOAuth2ViewControllerTouch controllerWithScope:kGTLAuthScopeYouTube
                                                               clientID:clientID
                                                           clientSecret:clientSecret
                                                       keychainItemName:kKeychainItemName
@@ -202,7 +233,7 @@ NSDictionary *googleProfile = nil;
 
     
     // Optional: display some html briefly before the sign-in page loads
-    NSString *html = @"<html><body bgcolor=silver><div align=center>Loading sign-in page...</div></body></html>";
+    NSString *html = @"<html><body bgcolor=white><div align=center>Loading sign-in page...</div></body></html>";
     viewController.initialHTMLString = html;
     
     [[self navigationController] pushViewController:viewController animated:YES];
@@ -255,24 +286,167 @@ NSDictionary *googleProfile = nil;
     // signed-in user
     [self doAnAuthenticatedAPIFetch];
 }
+- (IBAction)getVideosClicked:(id)sender{
+    if ( self._myPlaylists == nil) {
+        [self fetchMyChannelList];
+    } else {
+        [self fetchSelectedPlaylist];
+    }
+}
+
+#pragma mark - Fetch Playlist
+
+- (void)fetchMyChannelList {
+    self._myPlaylists = nil;
+    _channelListFetchError = nil;
+    
+//    NSLog(@"self.youTubeService : %@", self.youTubeService);
+    GTLServiceYouTube *service = self.youTubeService;
+    
+    GTLQueryYouTube *query = [GTLQueryYouTube queryForChannelsListWithPart:@"contentDetails"];
+    query.mine = YES;
+    
+    // maxResults specifies the number of results per page.  Since we earlier
+    // specified shouldFetchNextPages=YES, all results should be fetched,
+    // though specifying a larger maxResults will reduce the number of fetches
+    // needed to retrieve all pages.
+    query.maxResults = 50;
+    
+    // We can specify the fields we want here to reduce the network
+    // bandwidth and memory needed for the fetched collection.
+    //
+    // For example, leave query.fields as nil during development.
+    // When ready to test and optimize your app, specify just the fields needed.
+    // For example, this sample app might use
+    //
+    // query.fields = @"kind,etag,items(id,etag,kind,contentDetails)";
+    
+    _channelListTicket = [service executeQuery:query
+                             completionHandler:^(GTLServiceTicket *ticket,
+                                                 GTLYouTubeChannelListResponse *channelList,
+                                                 NSError *error) {
+                                 // Callback
+                                 
+                                 // The contentDetails of the response has the playlists available for
+                                 // "my channel".
+                                 if ([[channelList items] count] > 0) {
+                                     GTLYouTubeChannel *channel = channelList[0];
+                                     self._myPlaylists = channel.contentDetails.relatedPlaylists;
+                                 }
+                                 _channelListFetchError = error;
+                                 _channelListTicket = nil;
+                                 
+                                 if (self._myPlaylists) {
+                                     [self fetchSelectedPlaylist];
+                                 }
+//
+//                                 [self fetchVideoCategories];
+                             }];
+    
+    [self updateUI];
+}
+
+- (void)fetchSelectedPlaylist {
+    NSString *playlistID = nil;
+//    NSInteger tag = [_playlistPopup selectedTag];
+    
+    // Only UploadsTag used for test
+    NSInteger tag = kUploadsTag;
+    switch(tag) {
+        case kUploadsTag:      playlistID = self._myPlaylists.uploads; break;
+        case kLikesTag:        playlistID = _myPlaylists.likes; break;
+        case kFavoritesTag:    playlistID = _myPlaylists.favorites; break;
+        case kWatchHistoryTag: playlistID = _myPlaylists.watchHistory; break;
+        case kWatchLaterTag:   playlistID = _myPlaylists.watchLater; break;
+        default: NSAssert(0, @"Unexpected tag: %ld", (long)tag);
+    }
+    
+    if ([playlistID length] > 0) {
+        GTLServiceYouTube *service = self.youTubeService;
+        
+        GTLQueryYouTube *query = [GTLQueryYouTube queryForPlaylistItemsListWithPart:@"snippet,contentDetails"];
+        query.playlistId = playlistID;
+        query.maxResults = 50;
+        
+        _playlistItemListTicket = [service executeQuery:query
+                                      completionHandler:^(GTLServiceTicket *ticket,
+                                                          GTLYouTubePlaylistItemListResponse *playlistItemList,
+                                                          NSError *error) {
+                                          // Callback
+                                          _playlistItemList = playlistItemList;
+                                          _playlistFetchError = error;
+                                          _playlistItemListTicket = nil;
+                                          
+                                          [self updateUI];
+                                      }];
+    }
+    [self updateUI];
+}
+
+
 - (void)updateUI{
     // update the text showing the signed-in state and the button title
     // A real program would use NSLocalizedString() for strings shown to the user.
+    if (_channelListFetchError) {
+        NSString *errorMsg = [NSString stringWithFormat:@"fetchChannelList Error : %@",_channelListFetchError];
+        [self displayAlertWithMessage:errorMsg];
+    }
+    if (_playlistFetchError) {
+        NSString *errorMsg = [NSString stringWithFormat:@"fetcPlayList Error : %@",_playlistFetchError];
+        [self displayAlertWithMessage:errorMsg];
+    }
+    [self.videoTableView reloadData];
+    
     
     if ([self isSignedIn]) {
         // signed in
         [btnSignInOut setTitle:@"Sign Out" forState:UIControlStateNormal];
+        self.LbSignInID.text = self.auth.userEmail;
         
     } else {
         // signed out
          [btnSignInOut setTitle:@"Sign In" forState:UIControlStateNormal];
+        self.LbSignInID.text = @"Nothing Yet";
     }
     
     
 }
 
+#pragma mark - TableView delegate and data source methods
 
+- (void)tableViewSelectionDidChange:(NSNotification *)notification {
+    [self updateUI];
+}
 
+// Table view data source methods.
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView{
+    return 1;
+}
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section{
+    if (tableView == videoTableView) {
+        return [_playlistItemList.items count];
+    }
+    return 0;
+}
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath{
+    static NSString *CellIdentifier = @"Cell";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:CellIdentifier];
+    
+    if (cell == nil) {
+        
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:CellIdentifier];
+        
+    }
+    
+    // Configure the cell...
+    if (tableView == videoTableView) {
+        GTLYouTubePlaylistItem *item = _playlistItemList[0];
+        NSString *title = item.snippet.title;
+        cell.textLabel.text = title;
+    }
+    
+    return cell;
+}
 
 
 - (void)awakeFromNib
@@ -303,6 +477,7 @@ NSDictionary *googleProfile = nil;
     // the scope string used to obtain the token.  For Google services,
     // the auth object also holds the user's email address.
     self.auth = anAuth;
+    self.youTubeService.authorizer = anAuth;
 
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     googleProfile = [defaults objectForKey:kGoogleProfileKey];
@@ -347,10 +522,34 @@ NSDictionary *googleProfile = nil;
         // network connection was found again
     }
 }
+- (GTLServiceYouTube *)youTubeService {
+    static GTLServiceYouTube *service;
+    
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        service = [[GTLServiceYouTube alloc] init];
+        
+        // Have the service object set tickets to fetch consecutive pages
+        // of the feed so we do not need to manually fetch them.
+        service.shouldFetchNextPages = YES;
+        
+        // Have the service object set tickets to retry temporary error conditions
+        // automatically.
+        service.retryEnabled = YES;
+    });
+    return service;
+}
 
 - (void)viewDidLoad
 {
     [super viewDidLoad];
+    
+    if (!videoTableView) {
+        videoTableView = [[UITableView alloc]init];
+    }
+    videoTableView.delegate = self;
+    videoTableView.dataSource = self;
+    
     [self updateUI];
 }
 
